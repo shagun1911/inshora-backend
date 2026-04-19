@@ -356,7 +356,7 @@ def generate_blog_post():
     Write a comprehensive, SEO-optimized blog post about "{topic}" for Inshora Group insurance.
     
     Write 4-5 detailed sections (H2) with 2-3 paragraphs each. Total 1500-1800 words.
-    Include: intro with keyword, 4-5 main sections with full content, FAQ with 3-4 questions, conclusion with CTA.
+    Include: intro with keyword, 4-5 main sections with full content, FAQ with 8-10 questions and detailed answers, conclusion with CTA.
     Mention Inshora Group 3-4 times naturally. Include "Call (713) 943-9985" and Texas cities.
     Use lead words: "Get a free quote," "Contact us," "Compare rates." Add urgency and social proof.
     
@@ -391,10 +391,75 @@ def generate_blog_post():
             quality="standard",
             n=1,
         )
-        blog_data['image_url'] = image_response.data[0].url
+        image_url = image_response.data[0].url
         print("✓ Image generated with DALL-E")
+        
+        # Try Cloudinary first (for production), fallback to local storage
+        import requests
+        import os
+        from datetime import datetime
+        
+        # Check if Cloudinary credentials are available
+        cloudinary_available = all([
+            os.getenv('CLOUDINARY_CLOUD_NAME'),
+            os.getenv('CLOUDINARY_API_KEY'),
+            os.getenv('CLOUDINARY_API_SECRET')
+        ])
+        
+        if cloudinary_available:
+            try:
+                import cloudinary
+                import cloudinary.uploader
+                
+                # Configure Cloudinary
+                cloudinary.config(
+                    cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
+                    api_key=os.getenv('CLOUDINARY_API_KEY'),
+                    api_secret=os.getenv('CLOUDINARY_API_SECRET')
+                )
+                
+                # Download and upload to Cloudinary
+                img_response = requests.get(image_url, timeout=30)
+                if img_response.status_code == 200:
+                    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+                    upload_result = cloudinary.uploader.upload(
+                        img_response.content,
+                        public_id=f"inshora_blog_{timestamp}",
+                        folder="blog_images",
+                        resource_type="image"
+                    )
+                    print(f"✓ Image uploaded to Cloudinary: {upload_result['public_id']}")
+                    blog_data['image_url'] = upload_result['secure_url']
+                else:
+                    raise Exception(f"Failed to download image: {img_response.status_code}")
+            except Exception as cloudinary_error:
+                print(f"✗ Cloudinary upload failed, using local storage: {cloudinary_error}")
+                cloudinary_available = False
+        
+        # Fallback to local storage (for development)
+        if not cloudinary_available:
+            # Create images directory if it doesn't exist
+            images_dir = os.path.join(os.path.dirname(__file__), 'static', 'images')
+            os.makedirs(images_dir, exist_ok=True)
+            
+            # Generate unique filename
+            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+            filename = f"blog_{timestamp}.png"
+            filepath = os.path.join(images_dir, filename)
+            
+            # Download and save image locally
+            img_response = requests.get(image_url, timeout=30)
+            if img_response.status_code == 200:
+                with open(filepath, 'wb') as f:
+                    f.write(img_response.content)
+                print(f"✓ Image saved locally: {filename}")
+                blog_data['image_url'] = f"/static/images/{filename}"
+            else:
+                raise Exception(f"Failed to download image: {img_response.status_code}")
+            
     except Exception as e:
-        print(f"✗ Error generating image with DALL-E: {e}")
+        print(f"✗ Error generating/saving image: {e}")
+        # Fallback to placeholder
         blog_data['image_url'] = 'https://via.placeholder.com/1200x630/0B1F8F/FFFFFF?text=Inshora+Insurance'
     
     blog_data['created_at'] = datetime.utcnow()

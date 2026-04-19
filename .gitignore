@@ -61,6 +61,9 @@ logs/
 *.sqlite
 *.sqlite3
 
+# Static images (will use Cloudinary in production)
+static/images/
+
 # OS
 .DS_Store
 Thumbs.db

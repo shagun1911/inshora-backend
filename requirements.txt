@@ -6,3 +6,6 @@ livekit-plugins-openai
 livekit-plugins-noise-cancellation~=0.2
 python-dotenv
 pymongo
+openai
+cloudinary
+requests
