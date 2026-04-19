@@ -1,14 +1,30 @@
 """
-Blog Scheduler - Runs daily at 6 AM to generate and publish new blog posts
+Blog Scheduler - Runs daily at 6 AM US Central Time to generate and publish new blog posts
 """
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, date
 from dotenv import load_dotenv
 from pymongo import MongoClient
 import openai
 import json
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
+import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# Configure logging
+logging.basicConfig(
+    filename="blog_scheduler.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -17,9 +33,143 @@ MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGODB_URI)
 db = client.inshora
 blog_collection = db.blog_posts
+scheduler_logs_collection = db.scheduler_logs
 
 # OpenAI setup
 openai.api_key = os.getenv("OPENAI_API_KEY")
+
+# SMTP configuration
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_SECURE = os.getenv("SMTP_SECURE", "false").lower() == "true"
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+# Lock mechanism to prevent duplicate runs
+LOCK_FILE = "scheduler.lock"
+
+def is_locked():
+    """Check if scheduler lock file exists"""
+    return os.path.exists(LOCK_FILE)
+
+def acquire_lock():
+    """Acquire scheduler lock"""
+    try:
+        with open(LOCK_FILE, "w") as f:
+            f.write(str(datetime.utcnow().timestamp()))
+        logger.info("Scheduler lock acquired")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to acquire lock: {e}", exc_info=True)
+        return False
+
+def release_lock():
+    """Release scheduler lock"""
+    try:
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+            logger.info("Scheduler lock released")
+    except Exception as e:
+        logger.error(f"Failed to release lock: {e}", exc_info=True)
+
+def log_scheduler_run(status, attempts=1, error_message=None):
+    """Log scheduler run to MongoDB for analytics and debugging"""
+    try:
+        central_tz = pytz.timezone('America/Chicago')
+        today = datetime.now(central_tz).date()
+        
+        log_entry = {
+            'date': str(today),
+            'status': status,
+            'attempts': attempts,
+            'timestamp': datetime.utcnow(),
+            'error_message': error_message
+        }
+        
+        scheduler_logs_collection.insert_one(log_entry)
+        logger.info(f"Scheduler run logged: {status} with {attempts} attempt(s)")
+    except Exception as e:
+        logger.error(f"Failed to log scheduler run: {e}", exc_info=True)
+
+def send_email_notification(blog_data):
+    """Send email notification after successful blog post"""
+    try:
+        if not all([SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO]):
+            logger.warning("SMTP configuration incomplete. Skipping email notification.")
+            print("✗ SMTP configuration incomplete. Skipping email notification.")
+            return False
+
+        # Create email message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"🚀 New Blog Post Published: {blog_data['title']}"
+        msg['From'] = EMAIL_FROM
+        msg['To'] = EMAIL_TO
+
+        # Create HTML email body
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                <h2 style="color: #0B1F8F;">🎉 New Blog Post Published!</h2>
+                
+                <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
+                    <h3 style="color: #0B1F8F; margin-top: 0;">{blog_data['title']}</h3>
+                    <p><strong>Category:</strong> {blog_data.get('category', 'Insurance Tips')}</p>
+                    <p><strong>Author:</strong> {blog_data.get('author', 'Inshora AI')}</p>
+                    <p><strong>Published:</strong> {blog_data.get('created_at', datetime.utcnow()).strftime('%Y-%m-%d %H:%M:%S')}</p>
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <h4 style="color: #0B1F8F;">Excerpt:</h4>
+                    <p style="font-style: italic;">{blog_data.get('excerpt', 'No excerpt available')}</p>
+                </div>
+
+                <div style="margin: 20px 0;">
+                    <h4 style="color: #0B1F8F;">Tags:</h4>
+                    <p>{', '.join(blog_data.get('tags', []))}</p>
+                </div>
+
+                <div style="background: #0B1F8F; color: white; padding: 15px; border-radius: 8px; margin: 20px 0;">
+                    <p style="margin: 0; text-align: center; font-size: 16px;">
+                        <strong>Inshora Group - Your Trusted Insurance Partner</strong><br>
+                        Call (713) 943-9985 for instant quotes
+                    </p>
+                </div>
+
+                <p style="color: #666; font-size: 12px; text-align: center; margin-top: 30px;">
+                    This is an automated notification from the Inshora Blog Scheduler.<br>
+                    Generated at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+
+        # Attach HTML body
+        html_part = MIMEText(html_body, 'html')
+        msg.attach(html_part)
+
+        # Send email
+        logger.info(f"Sending email notification to {EMAIL_TO}...")
+        print(f"Sending email notification to {EMAIL_TO}...")
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            # Always use STARTTLS for Gmail on port 587
+            if SMTP_PORT == 587:
+                server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+
+        logger.info("Email notification sent successfully")
+        print("✓ Email notification sent successfully")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to send email notification: {e}", exc_info=True)
+        print(f"✗ Failed to send email notification: {e}")
+        return False
 
 def generate_blog_post():
     """Generate a blog post using OpenAI"""
@@ -467,51 +617,248 @@ def generate_blog_post():
     
     return blog_data
 
+def blog_already_exists(today_date):
+    """Check if a blog post already exists for today"""
+    try:
+        # Start of day in Central timezone
+        central_tz = pytz.timezone('US/Central')
+        start_of_day = central_tz.localize(datetime.combine(today_date, datetime.min.time()))
+        end_of_day = central_tz.localize(datetime.combine(today_date, datetime.max.time()))
+
+        existing = blog_collection.find_one({
+            'created_at': {
+                '$gte': start_of_day,
+                '$lte': end_of_day
+            },
+            'published': True
+        })
+
+        if existing:
+            logger.info(f"Blog already exists for {today_date}: {existing.get('title', 'Unknown')}")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error checking for existing blog: {e}", exc_info=True)
+        return False
+
 def save_blog_post(blog_data):
     """Save blog post to MongoDB"""
     try:
         result = blog_collection.insert_one(blog_data)
+        logger.info(f"Blog post saved with ID: {result.inserted_id}")
+        logger.info(f"Title: {blog_data['title']}")
         print(f"✓ Blog post saved with ID: {result.inserted_id}")
         print(f"  Title: {blog_data['title']}")
         return str(result.inserted_id)
     except Exception as e:
+        logger.error(f"Error saving blog post: {e}", exc_info=True)
         print(f"✗ Error saving blog post: {e}")
         return None
 
 def generate_and_publish_blog():
-    """Main function to generate and publish a blog post"""
+    """Main function to generate and publish a blog post with retry logic"""
+    logger.info("=" * 60)
+    logger.info("Starting automated blog generation")
+    logger.info("=" * 60)
+    
     print("=" * 60)
     print("Automated Blog Generation")
     print("=" * 60)
     print(f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print()
     
+    # Check if job is already running (lock mechanism)
+    if is_locked():
+        logger.warning("Job already running (lock file exists). Skipping this run.")
+        print("✗ Job already running (lock file exists). Skipping this run.")
+        return False
+    
+    # Acquire lock
+    if not acquire_lock():
+        logger.error("Failed to acquire lock. Aborting job.")
+        print("✗ Failed to acquire lock. Aborting job.")
+        return False
+    
     try:
-        # Generate blog post
-        blog_data = generate_blog_post()
+        # Check for duplicate blog post for today
+        central_tz = pytz.timezone('America/Chicago')
+        today = datetime.now(central_tz).date()
         
-        # Save to MongoDB
-        blog_id = save_blog_post(blog_data)
-        
-        if blog_id:
-            print()
-            print("=" * 60)
-            print("✓ Blog post generated and published successfully!")
-            print("=" * 60)
-            return True
-        else:
-            print()
-            print("=" * 60)
-            print("✗ Failed to publish blog post")
-            print("=" * 60)
-            return False
+        if blog_already_exists(today):
+            logger.info(f"Blog already published for {today}. Skipping generation.")
+            print(f"✓ Blog already published for {today}. Skipping generation.")
             
+            # Log skipped run
+            log_scheduler_run('skipped', attempts=0, error_message='Blog already exists for today')
+            
+            return True
+        
+        # Retry logic for transient failures with exponential backoff
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                # Exponential backoff: 30s, 60s, 120s
+                if attempt > 0:
+                    retry_delay = (2 ** attempt) * 30
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    print(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                
+                logger.info(f"Attempt {attempt + 1}/{max_retries}")
+                print(f"Attempt {attempt + 1}/{max_retries}")
+                
+                # Generate blog post
+                logger.info("Generating blog post content...")
+                blog_data = generate_blog_post()
+                
+                # Quality check: ensure blog content is not empty or too short
+                if not blog_data:
+                    raise Exception("No blog data generated")
+                
+                blog_content = blog_data.get('content', '')
+                if not blog_content or len(blog_content) < 800:
+                    raise Exception(f"Low quality blog generated: content length {len(blog_content)} < 800 characters")
+                
+                # Save to MongoDB
+                logger.info("Saving blog post to database...")
+                blog_id = save_blog_post(blog_data)
+                
+                if blog_id:
+                    logger.info("Blog post generated and published successfully!")
+                    print()
+                    print("=" * 60)
+                    print("✓ Blog post generated and published successfully!")
+                    print("=" * 60)
+                    
+                    # Log successful run
+                    log_scheduler_run('success', attempts=attempt + 1)
+                    
+                    # Send email notification
+                    send_email_notification(blog_data)
+                    
+                    return True
+                else:
+                    logger.error(f"Failed to save blog post on attempt {attempt + 1}")
+                    if attempt < max_retries - 1:
+                        logger.info(f"Retrying in {(2 ** (attempt + 1)) * 30} seconds...")
+                        print(f"✗ Failed to save blog post. Retrying...")
+                    else:
+                        logger.error("Max retries reached. Failed to publish blog post.")
+                        print()
+                        print("=" * 60)
+                        print("✗ Failed to publish blog post after max retries")
+                        print("=" * 60)
+                        
+                        # Log failed run
+                        log_scheduler_run('failed', attempts=max_retries, error_message='Max retries reached')
+                        
+                        return False
+                    
+            except Exception as e:
+                logger.error(f"Error in blog generation (attempt {attempt + 1}): {e}", exc_info=True)
+                print(f"✗ Error in blog generation (attempt {attempt + 1}): {e}")
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {(2 ** (attempt + 1)) * 30} seconds...")
+                    print(f"Retrying...")
+                else:
+                    logger.error("Max retries reached. Failed to publish blog post.")
+                    print()
+                    print("=" * 60)
+                    print("✗ Failed to publish blog post after max retries")
+                    print("=" * 60)
+                    import traceback
+                    traceback.print_exc()
+                    
+                    # Log failed run with error details
+                    log_scheduler_run('failed', attempts=max_retries, error_message=str(e))
+                    
+                    return False
+        
+        return False
+        
     except Exception as e:
-        print(f"✗ Error in blog generation: {e}")
+        logger.error(f"Unexpected error in blog generation: {e}", exc_info=True)
+        print(f"✗ Unexpected error: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Log failed run with error details
+        log_scheduler_run('failed', attempts=0, error_message=f"Unexpected error: {str(e)}")
+        
         return False
+        
+    finally:
+        # Always release lock
+        release_lock()
 
 if __name__ == "__main__":
-    success = generate_and_publish_blog()
-    sys.exit(0 if success else 1)
+    # Check if running as cron job (single execution) or as scheduler daemon
+    run_once = '--run-once' in sys.argv
+    
+    logger.info("=" * 60)
+    logger.info("Starting Blog Scheduler")
+    logger.info("=" * 60)
+    
+    if run_once:
+        logger.info("Running in single-execution mode (cron job)")
+        print("=" * 60)
+        print("Blog Scheduler - Single Execution Mode")
+        print("=" * 60)
+        
+        # Run once and exit
+        success = generate_and_publish_blog()
+        sys.exit(0 if success else 1)
+    else:
+        # Run as continuous scheduler daemon
+        try:
+            # Set up scheduler to run daily at 6 AM US Central Time
+            scheduler = BackgroundScheduler(timezone=pytz.timezone('America/Chicago'))
+            
+            # Schedule job to run daily at 6:00 AM Central Time
+            scheduler.add_job(
+                generate_and_publish_blog,
+                trigger=CronTrigger(hour=6, minute=0, timezone='America/Chicago'),
+                id='daily_blog_post',
+                name='Daily Blog Post Generation',
+                replace_existing=True
+            )
+            
+            logger.info("Scheduler configured to run daily at 6:00 AM America/Chicago")
+            
+            print("=" * 60)
+            print("Blog Scheduler Started")
+            print("=" * 60)
+            print(f"Scheduler will run daily at 6:00 AM America/Chicago (US Central)")
+            print(f"Current time (Central): {datetime.now(pytz.timezone('America/Chicago')).strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"Log file: blog_scheduler.log")
+            print(f"Lock file: {LOCK_FILE}")
+            print(f"Success tracking: MongoDB scheduler_logs collection")
+            print("=" * 60)
+            print("\nFor cron job fallback, use:")
+            print("0 6 * * * cd /path/to/backend && python blog_scheduler.py --run-once")
+            print("=" * 60)
+            
+            # Start the scheduler
+            scheduler.start()
+            logger.info("Scheduler started successfully")
+            
+            try:
+                # Keep the script running
+                while True:
+                    time.sleep(1)
+            except (KeyboardInterrupt, SystemExit):
+                # Shut down the scheduler gracefully
+                logger.info("Shutting down scheduler...")
+                scheduler.shutdown()
+                logger.info("Scheduler shut down gracefully")
+                print("\nScheduler shut down gracefully.")
+                sys.exit(0)
+                
+        except Exception as e:
+            logger.error(f"Fatal error starting scheduler: {e}", exc_info=True)
+            print(f"✗ Fatal error starting scheduler: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
