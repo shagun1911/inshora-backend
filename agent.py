@@ -1,3 +1,4 @@
+import os
 from dotenv import load_dotenv
 from openai.types import realtime
 
@@ -63,7 +64,9 @@ class Sarah(Agent):
 async def entrypoint(ctx: JobContext):
     await ctx.connect()
 
+    realtime_model = os.getenv("OPENAI_REALTIME_MODEL", "gpt-4o-mini-realtime-preview-2024-12-17")
     model = openai.realtime.RealtimeModel(
+        model=realtime_model,
         voice="alloy",
         temperature=0.7,
         input_audio_transcription=realtime.AudioTranscription(
