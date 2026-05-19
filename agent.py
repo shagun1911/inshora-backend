@@ -70,7 +70,7 @@ async def entrypoint(ctx: JobContext):
         voice="alloy",
         temperature=0.7,
         input_audio_transcription=realtime.AudioTranscription(
-            model="whisper-1",
+            model="gpt-4o-mini-transcribe",
             language="en",
         ),
         turn_detection=realtime.realtime_audio_input_turn_detection.ServerVad(

@@ -4,7 +4,7 @@ Blog Scheduler - Runs daily at 6 AM US Central Time to generate and publish new 
 import os
 import sys
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from pymongo import MongoClient
 import openai
@@ -49,6 +49,7 @@ EMAIL_TO = os.getenv("EMAIL_TO")
 
 # Lock mechanism to prevent duplicate runs
 LOCK_FILE = "scheduler.lock"
+BLOG_RETENTION_DAYS = int(os.getenv("BLOG_RETENTION_DAYS", "60"))
 
 def is_locked():
     """Check if scheduler lock file exists"""
@@ -617,11 +618,31 @@ def generate_blog_post():
     
     return blog_data
 
+def delete_expired_blog_posts(retention_days=None):
+    """Remove blog posts older than retention_days (default 60). Runs on each daily job."""
+    days = retention_days if retention_days is not None else BLOG_RETENTION_DAYS
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        result = blog_collection.delete_many({'created_at': {'$lt': cutoff}})
+        deleted = result.deleted_count
+        if deleted:
+            logger.info(f"Deleted {deleted} blog post(s) older than {days} days (before {cutoff.isoformat()} UTC)")
+            print(f"✓ Deleted {deleted} blog post(s) older than {days} days")
+        else:
+            logger.info(f"No blog posts older than {days} days to delete")
+            print(f"✓ No blog posts older than {days} days to delete")
+        return deleted
+    except Exception as e:
+        logger.error(f"Error deleting expired blog posts: {e}", exc_info=True)
+        print(f"✗ Error deleting expired blog posts: {e}")
+        return 0
+
+
 def blog_already_exists(today_date):
     """Check if a blog post already exists for today"""
     try:
         # Start of day in Central timezone
-        central_tz = pytz.timezone('US/Central')
+        central_tz = pytz.timezone('America/Chicago')
         start_of_day = central_tz.localize(datetime.combine(today_date, datetime.min.time()))
         end_of_day = central_tz.localize(datetime.combine(today_date, datetime.max.time()))
 
@@ -680,6 +701,9 @@ def generate_and_publish_blog():
         return False
     
     try:
+        # Retention cleanup runs every day before publish attempt
+        delete_expired_blog_posts()
+
         # Check for duplicate blog post for today
         central_tz = pytz.timezone('America/Chicago')
         today = datetime.now(central_tz).date()

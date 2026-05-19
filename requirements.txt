@@ -1,5 +1,6 @@
 flask
 flask-cors
+gunicorn
 livekit
 livekit-agents[silero]
 livekit-plugins-openai

@@ -16,7 +16,12 @@ import openai
 load_dotenv()
 
 app = Flask(__name__, static_folder='static')
-CORS(app)
+
+_cors_origins = os.getenv(
+    'CORS_ORIGINS',
+    'http://localhost:5173,http://127.0.0.1:5173,https://www.inshoragroup.com,https://inshoragroup.com',
+).split(',')
+CORS(app, origins=[o.strip() for o in _cors_origins if o.strip()])
 
 LIVEKIT_URL = os.getenv("LIVEKIT_URL")
 LIVEKIT_API_KEY = os.getenv("LIVEKIT_API_KEY")
@@ -28,6 +33,18 @@ MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGODB_URI)
 db = client.inshora
 blog_collection = db.blog_posts
+leads_collection = db.leads
+
+# SMTP (lead notifications)
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+EMAIL_FROM = os.getenv("EMAIL_FROM")
+EMAIL_TO = os.getenv("EMAIL_TO")
+
+# Simple in-memory rate limit for contact submissions
+_contact_rate = {}
 
 # OpenAI setup
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -89,6 +106,113 @@ async def _create_room_async(room_name, user_identity):
 def health():
     return jsonify({'status': 'ok'})
 
+
+@app.route('/api/health', methods=['GET'])
+def api_health():
+    return jsonify({'status': 'ok'})
+
+
+def _send_lead_email(lead):
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    if not all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO]):
+        print("SMTP not configured; lead saved without email")
+        return False
+
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = f"New lead from Inshora ({lead.get('source', 'contact')})"
+    msg['From'] = EMAIL_FROM
+    msg['To'] = EMAIL_TO
+
+    body = f"""
+    <p><strong>Name:</strong> {lead.get('name', '')}</p>
+    <p><strong>Email:</strong> {lead.get('email', '')}</p>
+    <p><strong>Phone:</strong> {lead.get('phone', '')}</p>
+    <p><strong>ZIP:</strong> {lead.get('zip', '')}</p>
+    <p><strong>Insurance type:</strong> {lead.get('insurance_type', '')}</p>
+    <p><strong>Source:</strong> {lead.get('source', '')}</p>
+    <p><strong>Message:</strong></p>
+    <p>{lead.get('message', '')}</p>
+    """
+    msg.attach(MIMEText(body, 'html'))
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SMTP_USER, SMTP_PASSWORD)
+        server.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
+    return True
+
+
+@app.route('/api/contact', methods=['POST'])
+def contact():
+    try:
+        data = request.json or {}
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
+
+        # Honeypot
+        if data.get('website'):
+            return jsonify({'success': True})
+
+        now = time.time()
+        last = _contact_rate.get(ip, 0)
+        if now - last < 30:
+            return jsonify({'success': False, 'error': 'Please wait before submitting again.'}), 429
+        _contact_rate[ip] = now
+
+        name = (data.get('name') or '').strip()
+        email = (data.get('email') or '').strip()
+        phone = (data.get('phone') or '').strip()
+        zip_code = (data.get('zip') or '').strip()
+        insurance_type = (data.get('insurance_type') or data.get('subject') or '').strip()
+        message = (data.get('message') or '').strip()
+        source = (data.get('source') or 'contact').strip()
+
+        if not name or not email:
+            return jsonify({'success': False, 'error': 'Name and email are required.'}), 400
+        if '@' not in email:
+            return jsonify({'success': False, 'error': 'Please provide a valid email.'}), 400
+
+        email_key = email.lower()
+        now_utc = datetime.utcnow()
+        lead = {
+            'name': name,
+            'email': email_key,
+            'phone': phone,
+            'zip': zip_code,
+            'insurance_type': insurance_type,
+            'message': message,
+            'source': source,
+            'ip': ip,
+            'updated_at': now_utc,
+        }
+        result = leads_collection.update_one(
+            {'email': email_key},
+            {
+                '$set': lead,
+                '$setOnInsert': {'created_at': now_utc},
+            },
+            upsert=True,
+        )
+        lead['created_at'] = now_utc
+        try:
+            _send_lead_email(lead)
+        except Exception as mail_err:
+            print(f"Lead email failed: {mail_err}")
+
+        return jsonify({
+            'success': True,
+            'updated': result.matched_count > 0 and result.modified_count > 0,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': 'Something went wrong. Please try again or call (713) 943-9985.',
+        }), 500
+
 # Blog API endpoints
 @app.route('/api/blog', methods=['GET'])
 def get_blogs():
@@ -123,17 +247,18 @@ def get_blogs():
 def delete_old_blogs():
     try:
         from datetime import datetime, timedelta
-        # Delete all blogs from before today (not just 24 hours ago)
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        
+        retention_days = int(os.getenv('BLOG_RETENTION_DAYS', '60'))
+        cutoff = datetime.utcnow() - timedelta(days=retention_days)
+
         result = blog_collection.delete_many({
-            'created_at': {'$lt': today}
+            'created_at': {'$lt': cutoff}
         })
-        
+
         return jsonify({
             'success': True,
             'deleted_count': result.deleted_count,
-            'message': f'Deleted {result.deleted_count} old blog posts'
+            'retention_days': retention_days,
+            'message': f'Deleted {result.deleted_count} blog posts older than {retention_days} days'
         })
     except Exception as e:
         import traceback
