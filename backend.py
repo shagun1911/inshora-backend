@@ -116,6 +116,51 @@ def api_health():
     return jsonify({'status': 'ok'})
 
 
+def _format_quote_details_html(quote_data):
+    if not quote_data or not isinstance(quote_data, dict):
+        return ''
+    rows = []
+    for key, value in quote_data.items():
+        if value is None or value == '':
+            continue
+        label = key.replace('_', ' ').title()
+        rows.append(f'<tr><td style="padding:6px 16px 6px 0;vertical-align:top;"><strong>{label}</strong></td><td>{value}</td></tr>')
+    if not rows:
+        return ''
+    return (
+        '<h4 style="color:#0B1F8F;margin-top:20px;">Quote intake details</h4>'
+        f'<table style="border-collapse:collapse;">{"".join(rows)}</table>'
+    )
+
+
+def _persist_lead(name, email, phone, zip_code, insurance_type, message, source, ip, quote_data=None):
+    email_key = email.lower()
+    now_utc = datetime.utcnow()
+    lead = {
+        'name': name,
+        'email': email_key,
+        'phone': phone,
+        'zip': zip_code,
+        'insurance_type': insurance_type,
+        'message': message,
+        'source': source,
+        'ip': ip,
+        'updated_at': now_utc,
+    }
+    if quote_data and isinstance(quote_data, dict):
+        lead['quote_data'] = quote_data
+    result = leads_collection.update_one(
+        {'email': email_key},
+        {
+            '$set': lead,
+            '$setOnInsert': {'created_at': now_utc},
+        },
+        upsert=True,
+    )
+    lead['created_at'] = now_utc
+    return lead, result
+
+
 def _send_lead_email(lead):
     import smtplib
     from email.mime.text import MIMEText
@@ -126,19 +171,25 @@ def _send_lead_email(lead):
         return False
 
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = f"New lead from Inshora ({lead.get('source', 'contact')})"
+    subject_type = lead.get('insurance_type', 'insurance').replace('_', ' ').title()
+    msg['Subject'] = f"New {subject_type} quote request — {lead.get('name', 'Inshora lead')}"
     msg['From'] = EMAIL_FROM
     msg['To'] = EMAIL_TO
 
+    quote_html = _format_quote_details_html(lead.get('quote_data'))
     body = f"""
+    <html><body style="font-family:Arial,sans-serif;line-height:1.5;color:#333;">
+    <h2 style="color:#0B1F8F;">New lead from Inshora</h2>
     <p><strong>Name:</strong> {lead.get('name', '')}</p>
     <p><strong>Email:</strong> {lead.get('email', '')}</p>
     <p><strong>Phone:</strong> {lead.get('phone', '')}</p>
     <p><strong>ZIP:</strong> {lead.get('zip', '')}</p>
     <p><strong>Insurance type:</strong> {lead.get('insurance_type', '')}</p>
     <p><strong>Source:</strong> {lead.get('source', '')}</p>
-    <p><strong>Message:</strong></p>
-    <p>{lead.get('message', '')}</p>
+    {quote_html}
+    <p><strong>Notes:</strong></p>
+    <p>{lead.get('message', '') or '—'}</p>
+    </body></html>
     """
     msg.attach(MIMEText(body, 'html'))
 
@@ -178,28 +229,9 @@ def contact():
         if '@' not in email:
             return jsonify({'success': False, 'error': 'Please provide a valid email.'}), 400
 
-        email_key = email.lower()
-        now_utc = datetime.utcnow()
-        lead = {
-            'name': name,
-            'email': email_key,
-            'phone': phone,
-            'zip': zip_code,
-            'insurance_type': insurance_type,
-            'message': message,
-            'source': source,
-            'ip': ip,
-            'updated_at': now_utc,
-        }
-        result = leads_collection.update_one(
-            {'email': email_key},
-            {
-                '$set': lead,
-                '$setOnInsert': {'created_at': now_utc},
-            },
-            upsert=True,
+        lead, result = _persist_lead(
+            name, email, phone, zip_code, insurance_type, message, source, ip
         )
-        lead['created_at'] = now_utc
         try:
             _send_lead_email(lead)
         except Exception as mail_err:
@@ -209,6 +241,68 @@ def contact():
             'success': True,
             'updated': result.matched_count > 0 and result.modified_count > 0,
         })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': 'Something went wrong. Please try again or call (713) 943-9985.',
+        }), 500
+
+
+@app.route('/api/quote-intake', methods=['POST'])
+def quote_intake():
+    """Structured multi-step quote wizard submission."""
+    try:
+        data = request.json or {}
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
+
+        if data.get('website'):
+            return jsonify({'success': True})
+
+        now = time.time()
+        last = _contact_rate.get(ip, 0)
+        if now - last < 30:
+            return jsonify({'success': False, 'error': 'Please wait before submitting again.'}), 429
+        _contact_rate[ip] = now
+
+        name = (data.get('name') or '').strip()
+        email = (data.get('email') or '').strip()
+        phone = (data.get('phone') or '').strip()
+        zip_code = (data.get('zip') or '').strip()
+        insurance_type = (data.get('insurance_type') or '').strip().lower()
+        message = (data.get('message') or '').strip()
+        quote_data = data.get('quote_data') or {}
+
+        if not name or not email or not phone:
+            return jsonify({'success': False, 'error': 'Name, email, and phone are required.'}), 400
+        if '@' not in email:
+            return jsonify({'success': False, 'error': 'Please provide a valid email.'}), 400
+        if not zip_code or len(zip_code) != 5 or not zip_code.isdigit():
+            return jsonify({'success': False, 'error': 'Please provide a valid 5-digit ZIP code.'}), 400
+        allowed_types = {'auto', 'home', 'renters', 'pet', 'bundle', 'flood', 'life', 'business'}
+        if insurance_type not in allowed_types:
+            return jsonify({'success': False, 'error': 'Please select a valid insurance type.'}), 400
+        if not isinstance(quote_data, dict):
+            return jsonify({'success': False, 'error': 'Invalid quote details.'}), 400
+
+        lead, result = _persist_lead(
+            name,
+            email,
+            phone,
+            zip_code,
+            insurance_type,
+            message,
+            'quote_wizard',
+            ip,
+            quote_data=quote_data,
+        )
+        try:
+            _send_lead_email(lead)
+        except Exception as mail_err:
+            print(f"Lead email failed: {mail_err}")
+
+        return jsonify({'success': True, 'updated': result.matched_count > 0})
     except Exception as e:
         import traceback
         traceback.print_exc()
