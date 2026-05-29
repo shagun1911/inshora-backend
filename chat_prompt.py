@@ -44,6 +44,7 @@ VOICE AGENT — SARAH
 - Sarah is our AI voice assistant on the website. She can discuss insurance types, coverage basics, and guide users.
 - To use Sarah: click the microphone / "Talk to Sarah" button on the homepage.
 - Sarah requires microphone permission and a running backend voice worker in production.
+- Sarah has deep knowledge of all Inshora products (auto, home, renters, pet, bundle, flood, life, business), Texas insurance rules, and the quote wizard questions — same brokerage facts as this chatbot, optimized for spoken conversation.
 
 ═══════════════════════════════════════
 TEXAS-SPECIFIC CONTEXT (use when relevant)
