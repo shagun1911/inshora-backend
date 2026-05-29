@@ -12,6 +12,7 @@ from livekit import api
 from dotenv import load_dotenv
 from pymongo import MongoClient
 import openai
+from chat_prompt import CHATBOT_SYSTEM_PROMPT
 
 load_dotenv()
 
@@ -45,6 +46,9 @@ EMAIL_TO = os.getenv("EMAIL_TO")
 
 # Simple in-memory rate limit for contact submissions
 _contact_rate = {}
+_chat_rate = {}
+
+CHAT_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 
 # OpenAI setup
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -211,6 +215,62 @@ def contact():
         return jsonify({
             'success': False,
             'error': 'Something went wrong. Please try again or call (713) 943-9985.',
+        }), 500
+
+
+@app.route('/api/chat', methods=['POST'])
+def chat():
+    """OpenAI-powered website chatbot."""
+    try:
+        if not openai.api_key:
+            return jsonify({'success': False, 'error': 'Chat is temporarily unavailable.'}), 503
+
+        data = request.json or {}
+        ip = request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
+
+        if data.get('website'):
+            return jsonify({'success': True, 'reply': ''})
+
+        now = time.time()
+        last = _chat_rate.get(ip, 0)
+        if now - last < 2:
+            return jsonify({'success': False, 'error': 'Please wait a moment before sending another message.'}), 429
+        _chat_rate[ip] = now
+
+        raw_messages = data.get('messages') or []
+        if not isinstance(raw_messages, list) or len(raw_messages) == 0:
+            return jsonify({'success': False, 'error': 'Message is required.'}), 400
+
+        openai_messages = [{'role': 'system', 'content': CHATBOT_SYSTEM_PROMPT}]
+        for item in raw_messages[-12:]:
+            role = (item.get('role') or '').strip().lower()
+            content = (item.get('content') or item.get('text') or '').strip()
+            if not content or role not in ('user', 'assistant'):
+                continue
+            if len(content) > 2000:
+                content = content[:2000]
+            openai_messages.append({'role': role, 'content': content})
+
+        if len(openai_messages) < 2:
+            return jsonify({'success': False, 'error': 'Message is required.'}), 400
+
+        response = openai.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=openai_messages,
+            temperature=0.6,
+            max_tokens=600,
+        )
+        reply = (response.choices[0].message.content or '').strip()
+        if not reply:
+            reply = 'I am sorry, I could not generate a response. Please call (713) 943-9985 or use our Contact page.'
+
+        return jsonify({'success': True, 'reply': reply})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': 'Chat is temporarily unavailable. Please call (713) 943-9985.',
         }), 500
 
 # Blog API endpoints
