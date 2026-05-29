@@ -5,6 +5,7 @@ Also handles automated blog system with OpenAI and MongoDB.
 import os
 import asyncio
 import time
+import html
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
@@ -116,6 +117,10 @@ def api_health():
     return jsonify({'status': 'ok'})
 
 
+def _escape_html(value):
+    return html.escape(str(value)) if value is not None else ''
+
+
 def _format_quote_details_html(quote_data):
     if not quote_data or not isinstance(quote_data, dict):
         return ''
@@ -123,8 +128,8 @@ def _format_quote_details_html(quote_data):
     for key, value in quote_data.items():
         if value is None or value == '':
             continue
-        label = key.replace('_', ' ').title()
-        rows.append(f'<tr><td style="padding:6px 16px 6px 0;vertical-align:top;"><strong>{label}</strong></td><td>{value}</td></tr>')
+        label = _escape_html(key.replace('_', ' ').title())
+        rows.append(f'<tr><td style="padding:6px 16px 6px 0;vertical-align:top;"><strong>{label}</strong></td><td>{_escape_html(value)}</td></tr>')
     if not rows:
         return ''
     return (
@@ -180,15 +185,15 @@ def _send_lead_email(lead):
     body = f"""
     <html><body style="font-family:Arial,sans-serif;line-height:1.5;color:#333;">
     <h2 style="color:#0B1F8F;">New lead from Inshora</h2>
-    <p><strong>Name:</strong> {lead.get('name', '')}</p>
-    <p><strong>Email:</strong> {lead.get('email', '')}</p>
-    <p><strong>Phone:</strong> {lead.get('phone', '')}</p>
-    <p><strong>ZIP:</strong> {lead.get('zip', '')}</p>
-    <p><strong>Insurance type:</strong> {lead.get('insurance_type', '')}</p>
-    <p><strong>Source:</strong> {lead.get('source', '')}</p>
+    <p><strong>Name:</strong> {_escape_html(lead.get('name', ''))}</p>
+    <p><strong>Email:</strong> {_escape_html(lead.get('email', ''))}</p>
+    <p><strong>Phone:</strong> {_escape_html(lead.get('phone', ''))}</p>
+    <p><strong>ZIP:</strong> {_escape_html(lead.get('zip', ''))}</p>
+    <p><strong>Insurance type:</strong> {_escape_html(lead.get('insurance_type', ''))}</p>
+    <p><strong>Source:</strong> {_escape_html(lead.get('source', ''))}</p>
     {quote_html}
     <p><strong>Notes:</strong></p>
-    <p>{lead.get('message', '') or '—'}</p>
+    <p>{_escape_html(lead.get('message', '') or '—')}</p>
     </body></html>
     """
     msg.attach(MIMEText(body, 'html'))
