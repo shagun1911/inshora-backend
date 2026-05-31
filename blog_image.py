@@ -52,7 +52,11 @@ def _store_image_bytes(image_bytes: bytes, *, prefix: str = "blog") -> str:
             print(f"✓ Image uploaded to Cloudinary: {upload_result['public_id']}")
             return upload_result["secure_url"]
         except Exception as exc:
-            print(f"✗ Cloudinary upload failed, using local storage: {exc}")
+            print(f"✗ Cloudinary upload failed: {exc}")
+
+    if os.getenv("RENDER"):
+        print(f"✓ Using default blog cover on Render: {DEFAULT_BLOG_IMAGE_URL}")
+        return DEFAULT_BLOG_IMAGE_URL
 
     STATIC_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     filename = f"{prefix}_{timestamp}.png"

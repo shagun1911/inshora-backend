@@ -461,6 +461,22 @@ def get_blog(blog_id):
         traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/blog/repair-images', methods=['POST'])
+def repair_blog_images():
+    """Regenerate Cloudinary URLs for posts with broken /static or placeholder images."""
+    expected = os.getenv('BLOG_SCHEDULER_TRIGGER_KEY')
+    if not expected:
+        return jsonify({'error': 'Scheduler trigger not configured'}), 503
+    provided = request.headers.get('X-Scheduler-Key') or (request.json or {}).get('key')
+    if provided != expected:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    from backfill_blog_images import backfill
+
+    updated = backfill(dry_run=False)
+    return jsonify({'success': True, 'updated_count': updated})
+
+
 @app.route('/api/blog/generate', methods=['POST'])
 def generate_blog():
     try:
