@@ -2,8 +2,8 @@ import os
 from dotenv import load_dotenv
 from openai.types import realtime
 
-from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions
-from livekit.plugins import openai
+from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, RoomInputOptions
+from livekit.plugins import openai, noise_cancellation
 from voice_prompt import VOICE_AGENT_INSTRUCTIONS
 
 load_dotenv()
@@ -15,8 +15,8 @@ class Sarah(Agent):
 
     async def on_enter(self):
         await self.session.say(
-            "Hi, I'm Sarah with Inshora Group. I can help with auto, home, renters, pet, and bundle insurance questions, or walk you through getting a quote. What would you like to know?",
-            allow_interruptions=False,
+            "Hi, I'm Sarah with Inshora Group. What insurance question can I help with today?",
+            allow_interruptions=True,
         )
 
 
@@ -27,27 +27,28 @@ async def entrypoint(ctx: JobContext):
     model = openai.realtime.RealtimeModel(
         model=realtime_model,
         voice="alloy",
-        temperature=0.7,
+        temperature=0.6,
         input_audio_transcription=realtime.AudioTranscription(
             model="gpt-4o-mini-transcribe",
             language="en",
         ),
         turn_detection=realtime.realtime_audio_input_turn_detection.ServerVad(
             type="server_vad",
-            threshold=0.6,
-            prefix_padding_ms=300,
-            silence_duration_ms=700,
+            threshold=0.5,
+            prefix_padding_ms=400,
+            silence_duration_ms=1100,
             create_response=True,
         ),
     )
 
-    tts = openai.TTS(model="tts-1", voice="alloy")
-
-    session = AgentSession(llm=model, tts=tts)
+    session = AgentSession(llm=model)
 
     await session.start(
         agent=Sarah(),
         room=ctx.room,
+        room_input_options=RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVC(),
+        ),
     )
 
 
