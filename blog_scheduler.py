@@ -550,24 +550,15 @@ def generate_blog_post():
         import os
         from datetime import datetime
         
-        # Check if Cloudinary credentials are available
-        cloudinary_available = all([
-            os.getenv('CLOUDINARY_CLOUD_NAME'),
-            os.getenv('CLOUDINARY_API_KEY'),
-            os.getenv('CLOUDINARY_API_SECRET')
-        ])
-        
+        from cloudinary_util import cloudinary_configured, configure_cloudinary
+
+        cloudinary_available = cloudinary_configured()
+
         if cloudinary_available:
             try:
-                import cloudinary
                 import cloudinary.uploader
-                
-                # Configure Cloudinary
-                cloudinary.config(
-                    cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
-                    api_key=os.getenv('CLOUDINARY_API_KEY'),
-                    api_secret=os.getenv('CLOUDINARY_API_SECRET')
-                )
+
+                configure_cloudinary()
                 
                 # Download and upload to Cloudinary
                 img_response = requests.get(image_url, timeout=30)
