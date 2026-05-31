@@ -64,6 +64,11 @@ logs/
 # Static images (will use Cloudinary in production)
 static/images/
 
+# Blog scheduler locks/logs
+scheduler.lock
+scheduler_process.lock
+blog_scheduler.log
+
 # OS
 .DS_Store
 Thumbs.db

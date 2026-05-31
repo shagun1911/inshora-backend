@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 import openai
 from chat_prompt import CHATBOT_SYSTEM_PROMPT
+from scheduler_service import get_scheduler_status, init_blog_scheduler
 
 load_dotenv()
 
@@ -109,7 +110,28 @@ async def _create_room_async(room_name, user_identity):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok', 'blog_scheduler': get_scheduler_status()})
+
+
+@app.route('/api/scheduler/status', methods=['GET'])
+def scheduler_status():
+    return jsonify(get_scheduler_status())
+
+
+@app.route('/api/scheduler/run-once', methods=['POST'])
+def scheduler_run_once():
+    """Manual blog generation for testing. Set BLOG_SCHEDULER_TRIGGER_KEY in env."""
+    expected = os.getenv('BLOG_SCHEDULER_TRIGGER_KEY')
+    if not expected:
+        return jsonify({'error': 'Scheduler trigger not configured'}), 503
+    provided = request.headers.get('X-Scheduler-Key') or (request.json or {}).get('key')
+    if provided != expected:
+        return jsonify({'error': 'Unauthorized'}), 401
+    from blog_scheduler import generate_and_publish_blog
+    import threading
+
+    threading.Thread(target=generate_and_publish_blog, daemon=True).start()
+    return jsonify({'status': 'started', 'message': 'Blog generation running in background'})
 
 
 @app.route('/api/health', methods=['GET'])
@@ -889,6 +911,9 @@ def generate_blog_post():
         blog_data['image_url'] = 'https://via.placeholder.com/1200x630/0B1F8F/FFFFFF?text=Inshora+Insurance'
     
     return blog_data
+
+
+init_blog_scheduler()
 
 
 if __name__ == '__main__':
