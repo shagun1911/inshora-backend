@@ -833,8 +833,7 @@ def generate_blog_post():
         
         # Try Cloudinary first (for production), fallback to local storage
         import requests
-        from datetime import datetime
-        
+
         from cloudinary_util import cloudinary_configured, configure_cloudinary
 
         cloudinary_available = cloudinary_configured()
