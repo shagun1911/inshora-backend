@@ -531,76 +531,10 @@ def generate_blog_post():
     blog_data = json.loads(response.choices[0].message.content)
     blog_data['author'] = 'Inshora AI'
     blog_data['category'] = 'Insurance Tips'
-    
-    # Generate image using DALL-E
-    try:
-        image_prompt = f"Professional insurance-related image about {topic}, modern business style, clean design, suitable for blog header"
-        image_response = openai.images.generate(
-            model="dall-e-3",
-            prompt=image_prompt,
-            size="1024x1024",
-            quality="standard",
-            n=1,
-        )
-        image_url = image_response.data[0].url
-        print("✓ Image generated with DALL-E")
-        
-        # Try Cloudinary first (for production), fallback to local storage
-        import requests
 
-        from cloudinary_util import cloudinary_configured, configure_cloudinary
+    from blog_image import generate_blog_image_url
 
-        cloudinary_available = cloudinary_configured()
-
-        if cloudinary_available:
-            try:
-                import cloudinary.uploader
-
-                configure_cloudinary()
-                
-                # Download and upload to Cloudinary
-                img_response = requests.get(image_url, timeout=30)
-                if img_response.status_code == 200:
-                    timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-                    upload_result = cloudinary.uploader.upload(
-                        img_response.content,
-                        public_id=f"inshora_blog_{timestamp}",
-                        folder="blog_images",
-                        resource_type="image"
-                    )
-                    print(f"✓ Image uploaded to Cloudinary: {upload_result['public_id']}")
-                    blog_data['image_url'] = upload_result['secure_url']
-                else:
-                    raise Exception(f"Failed to download image: {img_response.status_code}")
-            except Exception as cloudinary_error:
-                print(f"✗ Cloudinary upload failed, using local storage: {cloudinary_error}")
-                cloudinary_available = False
-        
-        # Fallback to local storage (for development)
-        if not cloudinary_available:
-            # Create images directory if it doesn't exist
-            images_dir = os.path.join(os.path.dirname(__file__), 'static', 'images')
-            os.makedirs(images_dir, exist_ok=True)
-            
-            # Generate unique filename
-            timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-            filename = f"blog_{timestamp}.png"
-            filepath = os.path.join(images_dir, filename)
-            
-            # Download and save image locally
-            img_response = requests.get(image_url, timeout=30)
-            if img_response.status_code == 200:
-                with open(filepath, 'wb') as f:
-                    f.write(img_response.content)
-                print(f"✓ Image saved locally: {filename}")
-                blog_data['image_url'] = f"/static/images/{filename}"
-            else:
-                raise Exception(f"Failed to download image: {img_response.status_code}")
-            
-    except Exception as e:
-        print(f"✗ Error generating/saving image: {e}")
-        # Fallback to placeholder
-        blog_data['image_url'] = 'https://via.placeholder.com/1200x630/0B1F8F/FFFFFF?text=Inshora+Insurance'
+    blog_data['image_url'] = generate_blog_image_url(topic)
     
     blog_data['created_at'] = datetime.utcnow()
     blog_data['published'] = True
