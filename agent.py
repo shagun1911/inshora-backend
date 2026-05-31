@@ -1,12 +1,23 @@
 import os
 from dotenv import load_dotenv
-from openai.types import realtime
 
-from livekit.agents import AgentSession, Agent, cli, JobContext, WorkerOptions, RoomInputOptions
-from livekit.plugins import openai, noise_cancellation
+from livekit.agents import (
+    AgentSession,
+    Agent,
+    cli,
+    JobContext,
+    JobProcess,
+    WorkerOptions,
+    RoomInputOptions,
+)
+from livekit.plugins import openai, silero
 from voice_prompt import VOICE_AGENT_INSTRUCTIONS
 
 load_dotenv()
+
+
+def prewarm(proc: JobProcess) -> None:
+    proc.userdata["vad"] = silero.VAD.load()
 
 
 class Sarah(Agent):
@@ -28,26 +39,21 @@ async def entrypoint(ctx: JobContext):
         model=realtime_model,
         voice="alloy",
         temperature=0.6,
-        input_audio_transcription=realtime.AudioTranscription(
-            model="gpt-4o-mini-transcribe",
-            language="en",
-        ),
-        turn_detection=realtime.realtime_audio_input_turn_detection.ServerVad(
-            type="server_vad",
-            threshold=0.5,
-            prefix_padding_ms=400,
-            silence_duration_ms=1100,
-            create_response=True,
-        ),
+        modalities=["audio", "text"],
+        turn_detection=None,
     )
 
-    session = AgentSession(llm=model)
+    session = AgentSession(
+        llm=model,
+        vad=ctx.proc.userdata["vad"],
+    )
 
     await session.start(
         agent=Sarah(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVC(),
+            pre_connect_audio=True,
+            pre_connect_audio_timeout=15.0,
         ),
     )
 
@@ -56,6 +62,7 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
             agent_name="inshora-sarah",
         )
     )
